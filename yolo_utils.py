@@ -3,6 +3,7 @@ import imghdr
 import os
 import random
 from keras import backend as K
+import tensorflow as tf
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -30,11 +31,15 @@ def generate_colors(class_names):
     return colors
 
 def scale_boxes(boxes, image_shape):
-    """ Scales the predicted boxes in order to be drawable on the image"""
+    """Scales the predicted boxes in order to be drawable on the image."""
     height = image_shape[0]
     width = image_shape[1]
-    image_dims = K.stack([height, width, height, width])
-    image_dims = K.reshape(image_dims, [1, 4])
+
+    # Use tf.stack instead of K.stack
+    image_dims = tf.stack([height, width, height, width])
+    image_dims = tf.reshape(image_dims, [1, 4])
+    image_dims = tf.cast(image_dims, dtype=tf.float32)  # Cast to float32
+    
     boxes = boxes * image_dims
     return boxes
 
@@ -47,10 +52,19 @@ def preprocess_image(img_path, model_image_size):
     image_data = np.expand_dims(image_data, 0)  # Add batch dimension.
     return image, image_data
 
+from PIL import ImageDraw, ImageFont
+import numpy as np
+
+from PIL import ImageDraw, ImageFont
+import numpy as np
+
 def draw_boxes(image, out_scores, out_boxes, out_classes, class_names, colors):
-    
-    font = ImageFont.truetype(font='font/FiraMono-Medium.otf',size=np.floor(3e-2 * image.size[1] + 0.5).astype('int32'))
+    # Load the default font
+    font = ImageFont.load_default()
     thickness = (image.size[0] + image.size[1]) // 300
+
+    # Initialize the drawing context
+    draw = ImageDraw.Draw(image)
 
     for i, c in reversed(list(enumerate(out_classes))):
         predicted_class = class_names[c]
@@ -59,24 +73,100 @@ def draw_boxes(image, out_scores, out_boxes, out_classes, class_names, colors):
 
         label = '{} {:.2f}'.format(predicted_class, score)
 
-        draw = ImageDraw.Draw(image)
-        label_size = draw.textsize(label, font)
+        # Calculate label size using textbbox or fallback to textsize if not available
+        try:
+            label_bbox = draw.textbbox((0, 0), label, font=font)
+            label_width = label_bbox[2] - label_bbox[0]
+            label_height = label_bbox[3] - label_bbox[1]
+        except AttributeError:
+            # Fallback to textsize if textbbox is not available
+            label_width, label_height = draw.textsize(label, font)
 
         top, left, bottom, right = box
         top = max(0, np.floor(top + 0.5).astype('int32'))
         left = max(0, np.floor(left + 0.5).astype('int32'))
         bottom = min(image.size[1], np.floor(bottom + 0.5).astype('int32'))
         right = min(image.size[0], np.floor(right + 0.5).astype('int32'))
-        print(label, (left, top), (right, bottom))
 
-        if top - label_size[1] >= 0:
-            text_origin = np.array([left, top - label_size[1]])
-        else:
-            text_origin = np.array([left, top + 1])
+        # Ensure valid coordinates before drawing
+        if left < right and top < bottom:
+            print(label, (left, top), (right, bottom))
 
-        # My kingdom for a good redistributable image drawing library.
-        for i in range(thickness):
-            draw.rectangle([left + i, top + i, right - i, bottom - i], outline=colors[c])
-        draw.rectangle([tuple(text_origin), tuple(text_origin + label_size)], fill=colors[c])
-        draw.text(text_origin, label, fill=(0, 0, 0), font=font)
-        del draw
+            # Calculate the position for the label
+            if top - label_height >= 0:
+                text_origin = np.array([left, top - label_height])
+            else:
+                text_origin = np.array([left, top + 1])
+
+            # Draw the bounding box
+            for i in range(thickness):
+                draw.rectangle([left + i, top + i, right - i, bottom - i], outline=colors[c])
+
+            # Draw the label background and text
+            draw.rectangle([tuple(text_origin), tuple(text_origin + (label_width, label_height))], fill=colors[c])
+            draw.text(text_origin, label, fill=(0, 0, 0), font=font)
+
+    # Clean up
+    del draw
+
+def mydraw_boxes(image, out_scores, out_boxes, out_classes, class_names, colors, output_folder="out"):
+    # Load the default font
+    font = ImageFont.load_default()
+    thickness = (image.size[0] + image.size[1]) // 300
+
+    # Initialize the drawing context
+    draw = ImageDraw.Draw(image)
+
+    for i, c in reversed(list(enumerate(out_classes))):
+        predicted_class = class_names[c]
+        box = out_boxes[i]
+        score = out_scores[i]
+
+        label = '{} {:.2f}'.format(predicted_class, score)
+
+        # Calculate label size using textbbox or fallback to textsize if not available
+        try:
+            label_bbox = draw.textbbox((0, 0), label, font=font)
+            label_width = label_bbox[2] - label_bbox[0]
+            label_height = label_bbox[3] - label_bbox[1]
+        except AttributeError:
+            # Fallback to textsize if textbbox is not available
+            label_width, label_height = draw.textsize(label, font)
+
+        top, left, bottom, right = box
+        top = max(0, np.floor(top + 0.5).astype(int))
+        left = max(0, np.floor(left + 0.5).astype(int))
+        bottom = min(image.size[1], np.floor(bottom + 0.5).astype(int))
+        right = min(image.size[0], np.floor(right + 0.5).astype(int))
+
+        # Ensure valid coordinates before drawing
+        if left < right and top < bottom:
+            print(label, (left, top), (right, bottom))
+
+            # Calculate the position for the label
+            text_origin = np.array([left, top - label_height]) if top - label_height >= 0 else np.array([left, top + 1])
+
+            # Draw the bounding box
+            for j in range(thickness):
+                draw.rectangle([left + j, top + j, right - j, bottom - j], outline=colors[c])
+
+            # Draw the label background
+            draw.rectangle([tuple(text_origin), tuple(text_origin + (label_width, label_height))], fill=colors[c])
+
+            # Draw the label text
+            draw.text(tuple(text_origin), label, fill=(0, 0, 0), font=font)
+
+            # Save the intermediate image after drawing each box
+            intermediate_image_path = os.path.join(output_folder, f"intermediate_{i}.jpg")
+            image.save(intermediate_image_path)
+            print(f"Saved intermediate image to {intermediate_image_path}")
+
+    # Final save after all boxes are drawn
+    final_image_path = os.path.join(output_folder, "final_output.jpg")
+    image.save(final_image_path)
+    print(f"Saved final output image to {final_image_path}")
+
+    # Clean up
+    del draw
+
+

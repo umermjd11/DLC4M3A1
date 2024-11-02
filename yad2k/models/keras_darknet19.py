@@ -3,8 +3,7 @@ import functools
 from functools import partial
 
 from keras.layers import Conv2D, MaxPooling2D
-from keras.layers.advanced_activations import LeakyReLU
-from keras.layers.normalization import BatchNormalization
+from tensorflow.keras.layers import LeakyReLU, BatchNormalization
 from keras.models import Model
 from keras.regularizers import l2
 

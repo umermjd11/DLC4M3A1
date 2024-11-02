@@ -3,9 +3,8 @@ import sys
 
 import numpy as np
 import tensorflow as tf
-from keras import backend as K
-from keras.layers import Lambda
-from keras.layers.merge import concatenate
+from tensorflow.keras import backend as K
+from tensorflow.keras.layers import Concatenate, Layer, Lambda
 from keras.models import Model
 
 from ..utils import compose
@@ -27,8 +26,7 @@ def space_to_depth_x2(x):
     """Thin wrapper for Tensorflow space_to_depth with block_size=2."""
     # Import currently required to make Lambda work.
     # See: https://github.com/fchollet/keras/issues/5088#issuecomment-273851273
-    import tensorflow as tf
-    return tf.space_to_depth(x, block_size=2)
+    return tf.nn.space_to_depth(x, block_size=2)
 
 
 def space_to_depth_x2_output_shape(input_shape):
@@ -62,7 +60,7 @@ def yolo_body(inputs, num_anchors, num_classes):
     return Model(inputs, x)
 
 
-def yolo_head(feats, anchors, num_classes):
+def yolo_head_old(feats, anchors, num_classes):
     """Convert final layer features to bounding box parameters.
 
     Parameters
@@ -94,22 +92,41 @@ def yolo_head(feats, anchors, num_classes):
     # conv_dims = K.variable([conv_width, conv_height])
 
     # Dynamic implementation of conv dims for fully convolutional model.
-    conv_dims = K.shape(feats)[1:3]  # assuming channels last
+    conv_dims = Lambda(lambda x: tf.shape(x)[1:3])(feats)                             # conv_dims = K.shape(feats)[1:3]  # assuming channels last
     # In YOLO the height index is the inner most iteration.
-    conv_height_index = K.arange(0, stop=conv_dims[0])
-    conv_width_index = K.arange(0, stop=conv_dims[1])
-    conv_height_index = K.tile(conv_height_index, [conv_dims[1]])
+    conv_height_index = Lambda(lambda x: tf.range(0, limit=x[0]))(conv_dims)         # conv_height_index = K.arange(0, stop=conv_dims[0])
+    conv_width_index = Lambda(lambda x: tf.range(0, limit=x[1]))(conv_dims)
+    conv_height_index = Lambda(lambda x: tf.tile(x[0], [x[1]]))([conv_height_index, conv_dims[1]])
+
 
     # TODO: Repeat_elements and tf.split doesn't support dynamic splits.
     # conv_width_index = K.repeat_elements(conv_width_index, conv_dims[1], axis=0)
-    conv_width_index = K.tile(K.expand_dims(conv_width_index, 0), [conv_dims[0], 1])
-    conv_width_index = K.flatten(K.transpose(conv_width_index))
-    conv_index = K.transpose(K.stack([conv_height_index, conv_width_index]))
-    conv_index = K.reshape(conv_index, [1, conv_dims[0], conv_dims[1], 1, 2])
-    conv_index = K.cast(conv_index, K.dtype(feats))
     
-    feats = K.reshape(feats, [-1, conv_dims[0], conv_dims[1], num_anchors, num_classes + 5])
-    conv_dims = K.cast(K.reshape(conv_dims, [1, 1, 1, 1, 2]), K.dtype(feats))
+    # Tile and expand conv_width_index
+    #conv_width_index = K.tile(K.expand_dims(conv_width_index, 0), [conv_dims[0], 1])
+    conv_width_index = Lambda(lambda x: K.tile(K.expand_dims(x[0], 0), [x[1][0], 1]))([conv_width_index, conv_dims])
+
+    # Flatten and transpose conv_width_index
+    # conv_width_index = K.flatten(K.transpose(conv_width_index))
+    conv_width_index = Lambda(lambda x: K.flatten(K.transpose(x)))(conv_width_index)
+
+    # Stack conv_height_index and conv_width_index, then reshape
+    # conv_index = K.transpose(K.stack([conv_height_index, conv_width_index]))
+    # conv_index = K.reshape(conv_index, [1, conv_dims[0], conv_dims[1], 1, 2])
+    conv_index = Lambda(lambda x: K.reshape(K.transpose(K.stack([x[0], x[1]])), [1, x[2][0], x[2][1], 1, 2]))([conv_height_index, conv_width_index, conv_dims])
+
+    # Cast conv_index to the same data type as feats
+    # conv_index = K.cast(conv_index, K.dtype(feats))
+    conv_index = Lambda(lambda x: K.cast(x[0], K.dtype(x[1])))([conv_index, feats])
+    
+    
+    # Reshape feats
+    # feats = K.reshape(feats, [-1, conv_dims[0], conv_dims[1], num_anchors, num_classes + 5])
+    feats = Lambda(lambda x: K.reshape(x, [-1, x.shape[1], x.shape[2], num_anchors, num_classes + 5]))(feats)
+
+    # Reshape and cast conv_dims
+    # conv_dims = K.cast(K.reshape(conv_dims, [1, 1, 1, 1, 2]), K.dtype(feats))
+    conv_dims = Lambda(lambda x: K.cast(K.reshape(x, [1, 1, 1, 1, 2]), K.dtype(feats)))(conv_dims)
 
     # Static generation of conv_index:
     # conv_index = np.array([_ for _ in np.ndindex(conv_width, conv_height)])
@@ -119,10 +136,24 @@ def yolo_head(feats, anchors, num_classes):
     # feats = Reshape(
     #     (conv_dims[0], conv_dims[1], num_anchors, num_classes + 5))(feats)
 
-    box_confidence = K.sigmoid(feats[..., 4:5])
-    box_xy = K.sigmoid(feats[..., :2])
-    box_wh = K.exp(feats[..., 2:4])
-    box_class_probs = K.softmax(feats[..., 5:])
+    
+
+    # Calculate box confidence
+    # box_confidence = K.sigmoid(feats[..., 4:5])
+    box_confidence = Lambda(lambda x: K.sigmoid(x[..., 4:5]))(feats)
+
+    # Calculate box xy coordinates
+    # box_xy = K.sigmoid(feats[..., :2])
+    box_xy = Lambda(lambda x: K.sigmoid(x[..., :2]))(feats)
+
+    # Calculate box width and height
+    # box_wh = K.exp(feats[..., 2:4])
+    box_wh = Lambda(lambda x: K.exp(x[..., 2:4]))(feats)
+
+    # Calculate class probabilities
+    # box_class_probs = K.softmax(feats[..., 5:])
+    box_class_probs = Lambda(lambda x: K.softmax(x[..., 5:]))(feats)
+
 
     # Adjust preditions to each spatial grid point and anchor size.
     # Note: YOLO iterates over height index before width index.
@@ -132,17 +163,184 @@ def yolo_head(feats, anchors, num_classes):
     return box_confidence, box_xy, box_wh, box_class_probs
 
 
+def yolo_head(feats, anchors, num_classes):
+    """Convert final layer features to bounding box parameters.
+
+    Parameters
+    ----------
+    feats : tensor
+        Final convolutional layer features.
+    anchors : array-like
+        Anchor box widths and heights.
+    num_classes : int
+        Number of target classes.
+
+    Returns
+    -------
+    box_xy : tensor
+        x, y box predictions adjusted by spatial location in conv layer.
+    box_wh : tensor
+        w, h box predictions adjusted by anchors and conv spatial resolution.
+    box_conf : tensor
+        Probability estimate for whether each box contains any object.
+    box_class_pred : tensor
+        Probability distribution estimate for each box over class labels.
+    """
+    num_anchors = len(anchors)
+    
+    # Reshape anchors to a tensor
+    anchors_tensor = tf.convert_to_tensor(anchors, dtype=tf.float32)
+    anchors_tensor = tf.reshape(anchors_tensor, [1, 1, 1, num_anchors, 2])
+    
+    # Dynamic implementation of conv dims for fully convolutional model.
+    conv_dims = tf.shape(feats)[1:3]  # assuming channels last
+    # Create height and width indices
+    conv_height_index = tf.range(0, conv_dims[0])
+    conv_width_index = tf.range(0, conv_dims[1])
+    
+    # Tile the height index
+    conv_height_index = tf.tile(tf.expand_dims(conv_height_index, axis=1), [1, conv_dims[1]])
+    conv_height_index = tf.reshape(conv_height_index, [-1])
+    
+    # Tile the width index
+    conv_width_index = tf.tile(tf.expand_dims(conv_width_index, axis=0), [conv_dims[0], 1])
+    conv_width_index = tf.reshape(conv_width_index, [-1])
+    
+    # Stack the indices and reshape
+    conv_index = tf.stack([conv_height_index, conv_width_index], axis=-1)
+    conv_index = tf.reshape(conv_index, [1, conv_dims[0], conv_dims[1], 1, 2])
+    
+    # Reshape feats to [batch_size, conv_height, conv_width, num_anchors, box_params]
+    feats = tf.reshape(feats, [-1, conv_dims[0], conv_dims[1], num_anchors, num_classes + 5])
+    
+    # Adjust box parameters
+    box_confidence = tf.sigmoid(feats[..., 4:5])
+    box_xy = tf.sigmoid(feats[..., :2])
+    box_wh = tf.exp(feats[..., 2:4])
+    box_class_probs = tf.nn.softmax(feats[..., 5:])
+    
+    # Adjust predictions to each spatial grid point and anchor size.
+    # Assuming box_xy and conv_index are float tensors and conv_dims is an int tensor
+    box_xy = (box_xy + tf.cast(conv_index, tf.float32)) / tf.cast(conv_dims, tf.float32)
+    box_wh = box_wh * anchors_tensor / tf.cast(conv_dims, tf.float32)
+
+    return box_confidence, box_xy, box_wh, box_class_probs
+
+
+import tensorflow as tf
+from tensorflow.keras.layers import Layer
+
+class YoloHead(Layer):
+    def __init__(self, anchors, num_classes, **kwargs):
+        super(YoloHead, self).__init__(**kwargs)
+        self.anchors = tf.convert_to_tensor(anchors, dtype=tf.float32)
+        self.num_classes = num_classes
+
+    def call(self, feats):
+        """Convert final layer features to bounding box parameters.
+
+        Parameters
+        ----------
+        feats : tensor
+            Final convolutional layer features.
+
+        Returns
+        -------
+        box_xy : tensor
+            x, y box predictions adjusted by spatial location in conv layer.
+        box_wh : tensor
+            w, h box predictions adjusted by anchors and conv spatial resolution.
+        box_conf : tensor
+            Probability estimate for whether each box contains any object.
+        box_class_pred : tensor
+            Probability distribution estimate for each box over class labels.
+        """
+        num_anchors = tf.shape(self.anchors)[0]
+        # Reshape anchors to a tensor
+        anchors_tensor = tf.reshape(self.anchors, [1, 1, 1, num_anchors, 2])
+
+        # Dynamic implementation of conv dims for fully convolutional model.
+        conv_dims = tf.shape(feats)[1:3]  # assuming channels last
+
+        # Create height and width indices
+        conv_height_index = tf.cast(tf.range(0, conv_dims[0]), dtype=tf.float32)
+        conv_width_index = tf.cast(tf.range(0, conv_dims[1]), dtype=tf.float32)
+
+        # Tile the height index
+        conv_height_index = tf.tile(tf.expand_dims(conv_height_index, axis=1), [1, conv_dims[1]])
+        conv_height_index = tf.reshape(conv_height_index, [-1])
+
+        # Tile the width index
+        conv_width_index = tf.tile(tf.expand_dims(conv_width_index, axis=0), [conv_dims[0], 1])
+        conv_width_index = tf.reshape(conv_width_index, [-1])
+
+        # Stack the indices and reshape
+        conv_index = tf.stack([conv_height_index, conv_width_index], axis=-1)
+        conv_index = tf.reshape(conv_index, [1, conv_dims[0], conv_dims[1], 1, 2])
+
+        # Reshape feats to [batch_size, conv_height, conv_width, num_anchors, box_params]
+        feats = tf.reshape(feats, [-1, conv_dims[0], conv_dims[1], num_anchors, self.num_classes + 5])
+
+        # Calculate box parameters
+        box_confidence = tf.sigmoid(feats[..., 4:5])
+        box_xy = tf.sigmoid(feats[..., :2])
+        box_wh = tf.exp(feats[..., 2:4])
+        box_class_probs = tf.nn.softmax(feats[..., 5:])
+
+        # Adjust predictions to each spatial grid point and anchor size.
+        box_xy = (box_xy + conv_index) / tf.cast(conv_dims, tf.float32)
+        box_wh = box_wh * anchors_tensor / tf.cast(conv_dims, tf.float32)
+
+        return box_confidence, box_xy, box_wh, box_class_probs
+# Example of how to use the YoloHead layer
+# anchors = [(1, 2), (2, 3), (3, 4)]  # Define your anchor boxes here
+# num_classes = 20  # Define the number of classes
+# yolo_head_layer = YoloHead(anchors, num_classes)
+# box_conf, box_xy, box_wh, box_class_probs = yolo_head_layer(feats_tensor)  # feats_tensor is your input tensor
+
+
 def yolo_boxes_to_corners(box_xy, box_wh):
     """Convert YOLO box predictions to bounding box corners."""
     box_mins = box_xy - (box_wh / 2.)
     box_maxes = box_xy + (box_wh / 2.)
 
-    return K.concatenate([
+    # Use tf.concat instead of K.concatenate
+    return tf.concat([
         box_mins[..., 1:2],  # y_min
         box_mins[..., 0:1],  # x_min
         box_maxes[..., 1:2],  # y_max
         box_maxes[..., 0:1]  # x_max
-    ])
+    ], axis=-1)
+
+class YoloBoxesToCorners(Layer):
+    def __init__(self, **kwargs):
+        super(YoloBoxesToCorners, self).__init__(**kwargs)
+
+    def call(self, box_xy, box_wh):
+        """Convert YOLO box predictions to bounding box corners.
+        
+        Parameters
+        ----------
+        box_xy : tensor
+            Center x, y coordinates of the boxes.
+        box_wh : tensor
+            Width and height of the boxes.
+
+        Returns
+        -------
+        tensor
+            Bounding box corners [y_min, x_min, y_max, x_max].
+        """
+        box_mins = box_xy - (box_wh / 2.0)
+        box_maxes = box_xy + (box_wh / 2.0)
+
+        # Use tf.concat to concatenate the min and max values
+        return tf.concat([
+            box_mins[..., 1:2],  # y_min
+            box_mins[..., 0:1],  # x_min
+            box_maxes[..., 1:2],  # y_max
+            box_maxes[..., 0:1]  # x_max
+        ], axis=-1)
 
 
 def yolo_loss(args,
@@ -316,6 +514,44 @@ def yolo_filter_boxes(box_confidence, boxes, box_class_probs, threshold=.6):
     classes = tf.boolean_mask(box_classes, prediction_mask)
 
     return boxes, scores, classes
+
+class YoloFilterBoxes(Layer):
+    def __init__(self, threshold=0.6, **kwargs):
+        super(YoloFilterBoxes, self).__init__(**kwargs)
+        self.threshold = threshold
+
+    def call(self, box_confidence, boxes, box_class_probs):
+        """Filter YOLO boxes based on object and class confidence.
+
+        Parameters
+        ----------
+        box_confidence : tensor
+            Probability estimate for whether each box contains an object.
+        boxes : tensor
+            Bounding box corners in [y_min, x_min, y_max, x_max] format.
+        box_class_probs : tensor
+            Probability distribution over class labels for each box.
+
+        Returns
+        -------
+        boxes : tensor
+            Filtered bounding boxes.
+        scores : tensor
+            Scores for the filtered boxes.
+        classes : tensor
+            Classes for the filtered boxes.
+        """
+        box_scores = box_confidence * box_class_probs
+        box_classes = tf.argmax(box_scores, axis=-1)
+        box_class_scores = tf.reduce_max(box_scores, axis=-1)
+        prediction_mask = box_class_scores >= self.threshold
+
+        # Use tf.boolean_mask to filter the boxes based on the prediction mask
+        boxes = tf.boolean_mask(boxes, prediction_mask)
+        scores = tf.boolean_mask(box_class_scores, prediction_mask)
+        classes = tf.boolean_mask(box_classes, prediction_mask)
+
+        return boxes, scores, classes
 
 
 def yolo_eval(yolo_outputs,
